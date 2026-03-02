@@ -1,38 +1,63 @@
-# src/processing/bronze_to_silver.py
+from google.cloud import storage
+import pandas as pd
+import io
 
-import os
+from src.config.settings import BUCKET_NAME
 from src.utils.logger import get_logger
-from src.config.settings import BRONZE_PATH, SILVER_PATH
 
 logger = get_logger(__name__)
 
+BRONZE_PATH = "bronze"
+SILVER_PATH = "silver/parquet"
 
-def transform():
-    """
-    Transform data from Bronze layer to Silver layer.
-    """
+client = storage.Client()
+bucket = client.bucket(BUCKET_NAME)
 
-    logger.info("Starting Bronze → Silver transformation")
 
-    try:
+def process_table(table_name):
 
-        # Aquí en el futuro leeremos datos desde Bronze
-        logger.info(f"Reading data from: {BRONZE_PATH}")
+    logger.info(f"Processing table: {table_name}")
 
-        # Aquí irán transformaciones
-        logger.info("Applying data cleaning and transformations")
+    blob_path = f"{BRONZE_PATH}/{table_name}/{table_name}.parquet"
+    blob = bucket.blob(blob_path)
 
-        # Aquí guardaremos datos en Silver
-        logger.info(f"Writing transformed data to: {SILVER_PATH}")
+    data = blob.download_as_bytes()
 
-        logger.info("Bronze → Silver transformation completed")
+    df = pd.read_parquet(io.BytesIO(data))
 
-    except Exception as e:
+    # ---------- LIMPIEZA ----------
+    df.columns = df.columns.str.lower().str.strip()
 
-        logger.error(f"Error in Bronze → Silver transformation: {str(e)}")
+    df = df.drop_duplicates()
 
-        raise
+    # ---------- GUARDAR SILVER ----------
+    output_buffer = io.BytesIO()
+
+    df.to_parquet(output_buffer, index=False)
+
+    silver_blob = bucket.blob(f"{SILVER_PATH}/{table_name}/{table_name}.parquet")
+
+    silver_blob.upload_from_string(output_buffer.getvalue())
+
+    logger.info(f"Silver created: {table_name}")
+
+
+def run():
+
+    tables = [
+        "clientes",
+        "deuda",
+        "pagos",
+        "productos",
+        "gestores",
+        "gestiones_cobranza",
+        "promesas_pago",
+        "dim_calendario"
+    ]
+
+    for table in tables:
+        process_table(table)
 
 
 if __name__ == "__main__":
-    transform()
+    run()
