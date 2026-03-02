@@ -1,167 +1,284 @@
-from pyspark.sql import SparkSession, functions as F
-import os
-import re
+# src/pipeline_wasi_qollqui.py
+# Wasi Qollqui - Spark Serverless (Dataproc) - Medallion (Bronze CSV -> Silver Parquet -> Gold Parquet + BigQuery)
+# Compatible con Dataproc Serverless (Spark) sin Delta.
 
-# ============================================================
-# Spark Session
-# ============================================================
+import os
+from typing import Dict, List
+
+from pyspark.sql import SparkSession, DataFrame, functions as F, types as T
+
+
+# =========================
+# Spark session
+# =========================
 spark = (
     SparkSession.builder
-    .appName("wasi-qollqui-pipeline")
+    .appName("wasi-qollqui-medallion-parquet")
     .getOrCreate()
 )
 
-# ============================================================
-# Config
-# - BUCKET llega por: --properties=spark.wasi.bucket=...
-# - DATASET y PROJECT se obtienen por env / defaults
-# ============================================================
-BUCKET = spark.conf.get("spark.wasi.bucket", None)
+spark.sparkContext.setLogLevel("INFO")
+
+
+# =========================
+# Config (desde Spark conf / env)
+# =========================
+def _get_env_any(keys: List[str], default: str = "") -> str:
+    for k in keys:
+        v = os.environ.get(k)
+        if v:
+            return v
+    return default
+
+
+BUCKET = spark.conf.get("spark.wasi.bucket", "")
 if not BUCKET:
-    raise ValueError("No se encontró spark.wasi.bucket. Pásalo con --properties=spark.wasi.bucket=TU_BUCKET")
+    raise ValueError("Falta spark.wasi.bucket. Pásalo en el job con --properties=spark.wasi.bucket=TU_BUCKET")
 
-PROJECT_ID = os.environ.get("GOOGLE_CLOUD_PROJECT") or os.environ.get("GCLOUD_PROJECT") or ""
-DATASET = os.environ.get("BQ_DATASET", "wasi_qollqui")  # si quieres, luego lo pasamos por env en GitHub Actions
+# Proyecto/dataset: intentamos inferirlos del entorno (GitHub Actions / GCP) y si no, usamos defaults.
+PROJECT_ID = spark.conf.get(
+    "spark.wasi.project",
+    _get_env_any(["GOOGLE_CLOUD_PROJECT", "GCLOUD_PROJECT", "CLOUDSDK_CORE_PROJECT"], default="")
+)
 
-bronze = f"gs://{BUCKET}/bronze/csv"
-silver = f"gs://{BUCKET}/silver/parquet"
-gold   = f"gs://{BUCKET}/gold/parquet"
+DATASET = spark.conf.get("spark.wasi.dataset", "wasi_qollqui")  # default por tu arquitectura
+BQ_LOCATION = spark.conf.get("spark.wasi.bq_location", "us-central1")
 
-# ============================================================
-# Helpers
-# ============================================================
-def normalize_cols(df):
-    """Normaliza nombres: lower, trim, espacios->_, quita símbolos raros."""
+# Paths Medallion
+BRONZE = f"gs://{BUCKET}/bronze/csv"
+SILVER = f"gs://{BUCKET}/silver/parquet"
+GOLD = f"gs://{BUCKET}/gold/parquet"
+
+# Tablas esperadas (nombres de archivo)
+TABLES = ["clientes", "deuda", "pagos", "gestiones_cobranza", "productos", "promesas_pago"]
+
+
+# =========================
+# Utils
+# =========================
+def gcs_path_exists(path: str) -> bool:
+    """
+    Valida si un path existe en GCS usando Hadoop FS.
+    """
+    jvm = spark._jvm
+    hconf = spark._jsc.hadoopConfiguration()
+    fs = jvm.org.apache.hadoop.fs.FileSystem.get(hconf)
+    p = jvm.org.apache.hadoop.fs.Path(path)
+    return fs.exists(p)
+
+
+def normalize_cols(df: DataFrame) -> DataFrame:
+    """
+    Normaliza columnas:
+    - strip
+    - lowercase
+    - espacios -> _
+    """
     for c in df.columns:
-        new_c = c.strip().lower()
-        new_c = re.sub(r"\s+", "_", new_c)
-        new_c = re.sub(r"[^a-z0-9_]", "", new_c)
+        new_c = c.strip().lower().replace(" ", "_")
         if new_c != c:
             df = df.withColumnRenamed(c, new_c)
     return df
 
-def to_double(df, colname):
-    """Convierte una columna a double (soporta separadores ,)."""
-    if colname not in df.columns:
-        return df
-    return df.withColumn(
-        colname,
-        F.regexp_replace(F.col(colname).cast("string"), ",", ".").cast("double")
-    )
 
-def pick_col(df, candidates):
-    """Devuelve el primer nombre de columna existente en df.columns."""
-    cols = set(df.columns)
-    for c in candidates:
-        if c in cols:
-            return c
-    return None
-
-def read_csv(name):
-    """Lee CSV de bronze/<name>.csv con inferSchema."""
+def read_csv_bronze(name: str, schema: T.StructType) -> DataFrame:
+    path = f"{BRONZE}/{name}.csv"
+    if not gcs_path_exists(path):
+        raise FileNotFoundError(f"No existe el archivo Bronze: {path}. Revisa que GitHub Actions subió data/*.csv")
     df = (
         spark.read
         .option("header", "true")
-        .option("inferSchema", "true")
-        .csv(f"{bronze}/{name}.csv")
+        .schema(schema)
+        .csv(path)
     )
     return normalize_cols(df)
 
-# ============================================================
-# Read Bronze (CSV)
-# ============================================================
-clientes = read_csv("clientes")
-deuda = read_csv("deuda")
-pagos = read_csv("pagos")
-promesas_pago = read_csv("promesas_pago")
-gestiones = read_csv("gestiones_cobranza")
-productos = read_csv("productos")
 
-# ============================================================
-# Identify key columns (tolerante a nombres distintos)
-# ============================================================
-cliente_id_col = pick_col(clientes, ["customer_id", "cliente_id", "id_cliente", "idcustomer", "id"])
-deuda_cliente_col = pick_col(deuda, ["customer_id", "cliente_id", "id_cliente", "idcustomer", "id"])
-pagos_cliente_col = pick_col(pagos, ["customer_id", "cliente_id", "id_cliente", "idcustomer", "id"])
+def write_parquet(df: DataFrame, path: str) -> None:
+    (
+        df.write
+        .mode("overwrite")
+        .parquet(path)
+    )
 
-monto_deuda_col = pick_col(deuda, ["monto_deuda", "deuda", "importe_deuda", "amount_debt", "monto"])
-monto_pago_col  = pick_col(pagos, ["monto_pagado", "monto_pago", "pago", "importe_pago", "amount_paid", "monto"])
 
-if not cliente_id_col:
-    raise ValueError("No se encontró columna de ID en clientes. Revisa nombres de columnas.")
-if not deuda_cliente_col or not pagos_cliente_col:
-    raise ValueError("No se encontró customer_id/cliente_id en deuda o pagos.")
-if not monto_deuda_col or not monto_pago_col:
-    raise ValueError("No se encontró monto en deuda o pagos (monto_deuda / monto_pagado).")
+def safe_div(numer_col, denom_col):
+    return F.when(denom_col.isNull() | (denom_col == 0), F.lit(None)).otherwise(numer_col / denom_col)
 
-# normalizamos tipos numéricos
-deuda = to_double(deuda, monto_deuda_col)
-pagos = to_double(pagos, monto_pago_col)
 
-# ============================================================
-# Silver (limpieza + escritura Parquet)
-# ============================================================
-# Si quieres reglas de calidad más estrictas, acá es donde van.
-clientes_s = clientes.dropDuplicates([cliente_id_col])
-deuda_s = deuda
-pagos_s = pagos
-promesas_s = promesas_pago
-gestiones_s = gestiones
-productos_s = productos
+# =========================
+# Schemas (para estabilidad)
+# =========================
+schemas: Dict[str, T.StructType] = {
+    "clientes": T.StructType([
+        T.StructField("customer_id", T.LongType(), True),
+        T.StructField("dni", T.StringType(), True),
+        T.StructField("nombre", T.StringType(), True),
+        T.StructField("telefono", T.StringType(), True),
+        T.StructField("direccion", T.StringType(), True),
+        T.StructField("fecha_registro", T.StringType(), True),  # parse luego
+    ]),
+    "deuda": T.StructType([
+        T.StructField("debt_id", T.LongType(), True),
+        T.StructField("customer_id", T.LongType(), True),
+        T.StructField("product_id", T.LongType(), True),
+        T.StructField("monto_deuda", T.DoubleType(), True),
+        T.StructField("fecha_vencimiento", T.StringType(), True),  # parse luego
+        T.StructField("estado", T.StringType(), True),
+    ]),
+    "pagos": T.StructType([
+        T.StructField("payment_id", T.LongType(), True),
+        T.StructField("debt_id", T.LongType(), True),
+        T.StructField("customer_id", T.LongType(), True),
+        T.StructField("monto_pago", T.DoubleType(), True),
+        T.StructField("fecha_pago", T.StringType(), True),  # parse luego
+    ]),
+    "gestiones_cobranza": T.StructType([
+        T.StructField("gestion_id", T.LongType(), True),
+        T.StructField("customer_id", T.LongType(), True),
+        T.StructField("resultado", T.StringType(), True),
+        T.StructField("canal", T.StringType(), True),
+        T.StructField("fecha_gestion", T.StringType(), True),  # parse luego
+    ]),
+    "productos": T.StructType([
+        T.StructField("product_id", T.LongType(), True),
+        T.StructField("producto", T.StringType(), True),
+        T.StructField("categoria", T.StringType(), True),
+    ]),
+    "promesas_pago": T.StructType([
+        T.StructField("promesa_id", T.LongType(), True),
+        T.StructField("customer_id", T.LongType(), True),
+        T.StructField("debt_id", T.LongType(), True),
+        T.StructField("monto_prometido", T.DoubleType(), True),
+        T.StructField("fecha_promesa", T.StringType(), True),  # parse luego
+    ]),
+}
 
-# Write Silver (Parquet)
-clientes_s.write.mode("overwrite").parquet(f"{silver}/clientes")
-deuda_s.write.mode("overwrite").parquet(f"{silver}/deuda")
-pagos_s.write.mode("overwrite").parquet(f"{silver}/pagos")
-promesas_s.write.mode("overwrite").parquet(f"{silver}/promesas_pago")
-gestiones_s.write.mode("overwrite").parquet(f"{silver}/gestiones_cobranza")
-productos_s.write.mode("overwrite").parquet(f"{silver}/productos")
 
-# ============================================================
-# Gold (KPIs)
-# KPI principal: kpi_cliente (para BI)
-# ============================================================
-deuda_by_cliente = (
-    deuda_s.groupBy(F.col(deuda_cliente_col).alias("customer_id"))
-    .agg(F.sum(F.col(monto_deuda_col)).alias("total_deuda"))
+# =========================
+# 1) Bronze -> Silver (Parquet)
+# =========================
+clientes = read_csv_bronze("clientes", schemas["clientes"]) \
+    .withColumn("fecha_registro", F.to_date("fecha_registro"))
+
+deuda = read_csv_bronze("deuda", schemas["deuda"]) \
+    .withColumn("fecha_vencimiento", F.to_date("fecha_vencimiento")) \
+    .withColumn("estado", F.upper(F.trim(F.col("estado"))))
+
+pagos = read_csv_bronze("pagos", schemas["pagos"]) \
+    .withColumn("fecha_pago", F.to_date("fecha_pago"))
+
+gestiones = read_csv_bronze("gestiones_cobranza", schemas["gestiones_cobranza"]) \
+    .withColumn("fecha_gestion", F.to_date("fecha_gestion")) \
+    .withColumn("resultado", F.upper(F.trim(F.col("resultado")))) \
+    .withColumn("canal", F.upper(F.trim(F.col("canal"))))
+
+productos = read_csv_bronze("productos", schemas["productos"]) \
+    .withColumn("categoria", F.upper(F.trim(F.col("categoria")))) \
+    .withColumn("producto", F.trim(F.col("producto")))
+
+promesas = read_csv_bronze("promesas_pago", schemas["promesas_pago"]) \
+    .withColumn("fecha_promesa", F.to_date("fecha_promesa"))
+
+# Calidad mínima (evita basura)
+clientes = clientes.filter(F.col("customer_id").isNotNull())
+deuda = deuda.filter(F.col("debt_id").isNotNull() & F.col("customer_id").isNotNull())
+pagos = pagos.filter(F.col("payment_id").isNotNull() & F.col("customer_id").isNotNull())
+gestiones = gestiones.filter(F.col("gestion_id").isNotNull() & F.col("customer_id").isNotNull())
+productos = productos.filter(F.col("product_id").isNotNull())
+promesas = promesas.filter(F.col("promesa_id").isNotNull() & F.col("customer_id").isNotNull())
+
+# Write Silver
+write_parquet(clientes, f"{SILVER}/clientes")
+write_parquet(deuda, f"{SILVER}/deuda")
+write_parquet(pagos, f"{SILVER}/pagos")
+write_parquet(gestiones, f"{SILVER}/gestiones_cobranza")
+write_parquet(productos, f"{SILVER}/productos")
+write_parquet(promesas, f"{SILVER}/promesas_pago")
+
+
+# =========================
+# 2) Silver -> Gold (KPIs)
+# =========================
+# KPI por cliente: deuda total, pagado total, pendiente, tasa recuperación
+deuda_cli = deuda.groupBy("customer_id").agg(
+    F.sum(F.col("monto_deuda")).alias("total_deuda"),
+    F.countDistinct("debt_id").alias("num_deudas"),
+    F.min("fecha_vencimiento").alias("min_fecha_vencimiento"),
+    F.max("fecha_vencimiento").alias("max_fecha_vencimiento"),
 )
 
-pagos_by_cliente = (
-    pagos_s.groupBy(F.col(pagos_cliente_col).alias("customer_id"))
-    .agg(F.sum(F.col(monto_pago_col)).alias("total_pagado"))
+pagos_cli = pagos.groupBy("customer_id").agg(
+    F.sum(F.col("monto_pago")).alias("total_pagado"),
+    F.countDistinct("payment_id").alias("num_pagos"),
+    F.min("fecha_pago").alias("min_fecha_pago"),
+    F.max("fecha_pago").alias("max_fecha_pago"),
 )
 
 kpi_cliente = (
-    deuda_by_cliente.join(pagos_by_cliente, on="customer_id", how="left")
-    .na.fill({"total_pagado": 0.0})
-    .withColumn("deuda_pendiente", F.col("total_deuda") - F.col("total_pagado"))
-    .withColumn(
-        "tasa_recuperacion",
-        F.when(F.col("total_deuda") > 0, F.col("total_pagado") / F.col("total_deuda")).otherwise(F.lit(0.0))
-    )
+    clientes.select("customer_id", "dni", "nombre")
+    .join(deuda_cli, on="customer_id", how="left")
+    .join(pagos_cli, on="customer_id", how="left")
+    .withColumn("total_deuda", F.coalesce(F.col("total_deuda"), F.lit(0.0)))
+    .withColumn("total_pagado", F.coalesce(F.col("total_pagado"), F.lit(0.0)))
+    .withColumn("deuda_pendiente", (F.col("total_deuda") - F.col("total_pagado")))
+    .withColumn("tasa_recuperacion", safe_div(F.col("total_pagado"), F.col("total_deuda")))
 )
 
-# Write Gold Parquet
-kpi_cliente.write.mode("overwrite").parquet(f"{gold}/kpi_cliente")
+# KPI adicional: gestiones por cliente (conteo)
+gest_cli = gestiones.groupBy("customer_id").agg(
+    F.count("*").alias("num_gestiones"),
+    F.countDistinct("canal").alias("num_canales"),
+    F.max("fecha_gestion").alias("ultima_gestion"),
+)
 
-# ============================================================
-# (Opcional pero recomendado) Publicar KPI en BigQuery
-# Esto hace que exista ${DATASET}.kpi_cliente para que tu step bq funcione siempre.
-# ============================================================
-# Requiere conector BigQuery (Dataproc normalmente lo incluye)
-try:
-    if PROJECT_ID:
-        (
-            kpi_cliente.write.format("bigquery")
-            .option("table", f"{PROJECT_ID}.{DATASET}.kpi_cliente")
-            .option("temporaryGcsBucket", BUCKET)
-            .mode("overwrite")
-            .save()
-        )
-        print(f"[OK] Tabla BigQuery creada/actualizada: {PROJECT_ID}.{DATASET}.kpi_cliente")
-    else:
-        print("[WARN] No se pudo detectar PROJECT_ID (GOOGLE_CLOUD_PROJECT). Se omitió escritura a BigQuery.")
-except Exception as e:
-    print(f"[WARN] No se pudo escribir a BigQuery (se mantiene Gold en GCS). Detalle: {e}")
+kpi_cliente = (
+    kpi_cliente
+    .join(gest_cli, on="customer_id", how="left")
+    .withColumn("num_gestiones", F.coalesce(F.col("num_gestiones"), F.lit(0)))
+    .withColumn("num_canales", F.coalesce(F.col("num_canales"), F.lit(0)))
+)
+
+# Write Gold (Parquet)
+write_parquet(kpi_cliente, f"{GOLD}/kpi_cliente")
+
+# También dejamos una vista agregada por categoría (opcional, útil para BI)
+deuda_prod = (
+    deuda.join(productos, on="product_id", how="left")
+    .groupBy("categoria")
+    .agg(
+        F.sum("monto_deuda").alias("total_deuda_categoria"),
+        F.countDistinct("debt_id").alias("num_deudas_categoria")
+    )
+)
+write_parquet(deuda_prod, f"{GOLD}/kpi_deuda_categoria")
+
+
+# =========================
+# 3) Gold -> BigQuery (tabla kpi_cliente)
+# =========================
+# Tu workflow hace: SELECT * FROM `${PROJECT_ID}.${DATASET}.kpi_cliente`;
+# Así que aquí garantizamos que exista esa tabla.
+if not PROJECT_ID:
+    # Si por alguna razón no se detecta el project, lo intentamos vía Spark conf
+    PROJECT_ID = spark.sparkContext.getConf().get("spark.hadoop.fs.gs.project.id", "")
+
+if not PROJECT_ID:
+    print("WARNING: No se pudo inferir PROJECT_ID. Se intentará escribir a BigQuery usando el proyecto por defecto del runner.")
+
+bq_table = f"{PROJECT_ID}.{DATASET}.kpi_cliente" if PROJECT_ID else f"{DATASET}.kpi_cliente"
+
+(
+    kpi_cliente
+    .write
+    .format("bigquery")
+    .option("table", bq_table)
+    .option("temporaryGcsBucket", BUCKET)
+    .mode("overwrite")
+    .save()
+)
+
+print(f"OK: kpi_cliente escrito en BigQuery: {bq_table}")
+print(f"OK: Silver Parquet en {SILVER}/... y Gold Parquet en {GOLD}/...")
 
 spark.stop()
