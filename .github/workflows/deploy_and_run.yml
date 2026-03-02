@@ -63,7 +63,8 @@ jobs:
       # 4) BIGQUERY: CREAR DATASET SI NO EXISTE + MATERIALIZAR TABLA BI
       - name: Create dataset if not exists
         run: |
-          bq --location=${BQ_LOCATION} mk --dataset --if_not_exists ${PROJECT_ID}:${DATASET}
+          bq ls ${PROJECT_ID}:${DATASET} || \
+          bq --location=${BQ_LOCATION} mk --dataset ${PROJECT_ID}:${DATASET}
 
       - name: Materialize BI table in BigQuery
         run: |
