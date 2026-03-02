@@ -56,17 +56,6 @@ TABLES = ["clientes", "deuda", "pagos", "gestiones_cobranza", "productos", "prom
 # =========================
 # Utils
 # =========================
-def gcs_path_exists(path: str) -> bool:
-    """
-    Valida si un path existe en GCS usando Hadoop FS.
-    """
-    jvm = spark._jvm
-    hconf = spark._jsc.hadoopConfiguration()
-    fs = jvm.org.apache.hadoop.fs.FileSystem.get(hconf)
-    p = jvm.org.apache.hadoop.fs.Path(path)
-    return fs.exists(p)
-
-
 def normalize_cols(df: DataFrame) -> DataFrame:
     """
     Normaliza columnas:
@@ -83,8 +72,6 @@ def normalize_cols(df: DataFrame) -> DataFrame:
 
 def read_csv_bronze(name: str, schema: T.StructType) -> DataFrame:
     path = f"{BRONZE}/{name}.csv"
-    if not gcs_path_exists(path):
-        raise FileNotFoundError(f"No existe el archivo Bronze: {path}. Revisa que GitHub Actions subió data/*.csv")
     df = (
         spark.read
         .option("header", "true")
