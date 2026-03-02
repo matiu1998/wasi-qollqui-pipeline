@@ -37,10 +37,9 @@ jobs:
           project_id: ${{ env.PROJECT_ID }}
           install_components: "bq"
 
-      # 1) SUBE CSV (bronze)
+      # 1) SUBE CSV (bronze) - NO mkdir en GCS
       - name: Upload Bronze CSVs to Cloud Storage
         run: |
-          gsutil -m mkdir -p gs://${BUCKET}/bronze/csv
           gsutil -m cp data/*.csv gs://${BUCKET}/bronze/csv/
           echo "Bronze files:"
           gsutil ls gs://${BUCKET}/bronze/csv/
@@ -48,8 +47,9 @@ jobs:
       # 2) SUBE CÓDIGO
       - name: Deploy Spark pipeline to Cloud Storage
         run: |
-          gsutil -m mkdir -p gs://${BUCKET}/code
           gsutil cp src/pipeline_wasi_qollqui.py gs://${BUCKET}/code/pipeline_wasi_qollqui.py
+          echo "Code files:"
+          gsutil ls gs://${BUCKET}/code/
 
       # 3) EJECUTA DATAPROC SERVERLESS
       - name: Run Dataproc Serverless batch
