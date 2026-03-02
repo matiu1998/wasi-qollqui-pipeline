@@ -156,6 +156,9 @@ def generate_kpi_cobranza_resumen():
 # ---------------------------------------
 # KPI PROMESAS
 # ---------------------------------------
+# ---------------------------------------
+# KPI PROMESAS
+# ---------------------------------------
 
 def generate_kpi_promesas():
 
@@ -165,7 +168,14 @@ def generate_kpi_promesas():
         "silver/promesas_pago/promesas_pago.parquet"
     )
 
+    # CORRECCIÓN DE TIPO
+    promesas["cumplida"] = pd.to_numeric(
+        promesas["cumplida"],
+        errors="coerce"
+    ).fillna(0)
+
     total_promesas = len(promesas)
+
     promesas_cumplidas = promesas["cumplida"].sum()
 
     tasa_cumplimiento = promesas_cumplidas / total_promesas
