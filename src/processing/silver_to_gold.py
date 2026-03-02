@@ -35,6 +35,12 @@ def upload_parquet(df, path):
 
     blob.upload_from_string(buffer.getvalue())
 
+    logger.info(f"Gold dataset written: {path}")
+
+
+# ---------------------------------------
+# KPI CLIENTE
+# ---------------------------------------
 
 def generate_kpi_cliente():
 
@@ -62,12 +68,27 @@ def generate_kpi_cliente():
     upload_parquet(df, "gold/kpi_cliente/kpi_cliente.parquet")
 
 
+# ---------------------------------------
+# KPI GESTOR
+# ---------------------------------------
+
 def generate_kpi_gestor():
 
     logger.info("Generating KPI Gestor")
 
-    gestiones = read_parquet_from_gcs("silver/gestiones_cobranza/gestiones_cobranza.parquet")
-    gestores = read_parquet_from_gcs("silver/gestores/gestores.parquet")
+    gestiones = read_parquet_from_gcs(
+        "silver/gestiones_cobranza/gestiones_cobranza.parquet"
+    )
+
+    gestores = read_parquet_from_gcs(
+        "silver/gestores/gestores.parquet"
+    )
+
+    # CORRECCIÓN DE TIPOS
+    gestiones["exito_gestion"] = pd.to_numeric(
+        gestiones["exito_gestion"],
+        errors="coerce"
+    ).fillna(0)
 
     gestiones_agg = gestiones.groupby("gestor_id").agg(
         total_gestiones=("gestion_id", "count"),
@@ -84,9 +105,13 @@ def generate_kpi_gestor():
     upload_parquet(df, "gold/kpi_gestor/kpi_gestor.parquet")
 
 
+# ---------------------------------------
+# KPI MORA
+# ---------------------------------------
+
 def generate_kpi_mora():
 
-    logger.info("Generating KPI Mora")
+    logger.info("Generating KPI Mora Bucket")
 
     deuda = read_parquet_from_gcs("silver/deuda/deuda.parquet")
 
@@ -97,6 +122,10 @@ def generate_kpi_mora():
 
     upload_parquet(df, "gold/kpi_mora_bucket/kpi_mora_bucket.parquet")
 
+
+# ---------------------------------------
+# KPI COBRANZA RESUMEN
+# ---------------------------------------
 
 def generate_kpi_cobranza_resumen():
 
@@ -118,28 +147,44 @@ def generate_kpi_cobranza_resumen():
         "recovery_rate": recovery_rate
     }])
 
-    upload_parquet(df, "gold/kpi_cobranza_resumen/kpi_cobranza_resumen.parquet")
+    upload_parquet(
+        df,
+        "gold/kpi_cobranza_resumen/kpi_cobranza_resumen.parquet"
+    )
 
+
+# ---------------------------------------
+# KPI PROMESAS
+# ---------------------------------------
 
 def generate_kpi_promesas():
 
-    logger.info("Generating KPI Promesas")
+    logger.info("Generating KPI Promesas Pago")
 
-    promesas = read_parquet_from_gcs("silver/promesas_pago/promesas_pago.parquet")
+    promesas = read_parquet_from_gcs(
+        "silver/promesas_pago/promesas_pago.parquet"
+    )
 
-    total = len(promesas)
-    cumplidas = promesas["cumplida"].sum()
+    total_promesas = len(promesas)
+    promesas_cumplidas = promesas["cumplida"].sum()
 
-    tasa = cumplidas / total
+    tasa_cumplimiento = promesas_cumplidas / total_promesas
 
     df = pd.DataFrame([{
-        "total_promesas": total,
-        "promesas_cumplidas": cumplidas,
-        "tasa_cumplimiento": tasa
+        "total_promesas": total_promesas,
+        "promesas_cumplidas": promesas_cumplidas,
+        "tasa_cumplimiento": tasa_cumplimiento
     }])
 
-    upload_parquet(df, "gold/kpi_promesas_pago/kpi_promesas_pago.parquet")
+    upload_parquet(
+        df,
+        "gold/kpi_promesas_pago/kpi_promesas_pago.parquet"
+    )
 
+
+# ---------------------------------------
+# RUN PIPELINE
+# ---------------------------------------
 
 def run():
 
@@ -151,7 +196,7 @@ def run():
     generate_kpi_cobranza_resumen()
     generate_kpi_promesas()
 
-    logger.info("Gold layer completed")
+    logger.info("Gold pipeline completed")
 
 
 if __name__ == "__main__":
