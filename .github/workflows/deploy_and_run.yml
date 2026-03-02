@@ -19,6 +19,7 @@ jobs:
       BUCKET: wasi-qollqui-lake-53930c9b
       DATASET: wasi_qollqui
       SA_EMAIL: github-actions-sa@project-53930c9b-4e21-4329-b74.iam.gserviceaccount.com
+      BQ_LOCATION: us-central1
 
     steps:
       - name: Checkout repository
@@ -45,12 +46,12 @@ jobs:
           gcloud dataproc batches submit pyspark gs://${BUCKET}/code/pipeline_wasi_qollqui.py \
             --region=${REGION} \
             --version=2.2 \
-            --service-account=${{ env.SA_EMAIL }} \
+            --service-account=${SA_EMAIL} \
             --properties=spark.wasi.bucket=${BUCKET}
 
       - name: Materialize BI table in BigQuery
         run: |
-          bq --location=US query --use_legacy_sql=false "
+          bq --location=${BQ_LOCATION} query --use_legacy_sql=false "
           CREATE OR REPLACE TABLE \`${PROJECT_ID}.${DATASET}.kpi_cliente_bi\` AS
           SELECT * FROM \`${PROJECT_ID}.${DATASET}.kpi_cliente\`;
           "
