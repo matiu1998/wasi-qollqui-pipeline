@@ -19,7 +19,7 @@ jobs:
       BUCKET: wasi-qollqui-lake-53930c9b
       DATASET: wasi_qollqui
       SA_EMAIL: github-actions-sa@project-53930c9b-4e21-4329-b74.iam.gserviceaccount.com
-      BQ_LOCATION: US
+      BQ_LOCATION: us-central1
 
     steps:
       - name: Checkout repository
@@ -63,7 +63,7 @@ jobs:
       # 4) BIGQUERY: CREAR DATASET SI NO EXISTE + MATERIALIZAR TABLA BI
       - name: Create dataset if not exists
         run: |
-          bq ls ${PROJECT_ID}:${DATASET} || \
+          bq show ${PROJECT_ID}:${DATASET} >/dev/null 2>&1 || \
           bq --location=${BQ_LOCATION} mk --dataset ${PROJECT_ID}:${DATASET}
 
       - name: Materialize BI table in BigQuery
