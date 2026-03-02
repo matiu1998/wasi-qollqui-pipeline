@@ -3,7 +3,7 @@ name: Deploy and Run Wasi Qollqui Pipeline
 on:
   workflow_dispatch: {}
   push:
-    branches: [ "main" ]
+    branches: ["main"]
 
 permissions:
   contents: read
@@ -19,7 +19,7 @@ jobs:
       BUCKET: wasi-qollqui-lake-53930c9b
       DATASET: wasi_qollqui
       SA_EMAIL: github-actions-sa@project-53930c9b-4e21-4329-b74.iam.gserviceaccount.com
-      BQ_LOCATION: us-central1
+      BQ_LOCATION: US
 
     steps:
       - name: Checkout repository
@@ -37,10 +37,21 @@ jobs:
           project_id: ${{ env.PROJECT_ID }}
           install_components: "bq"
 
+      # 1) SUBE CSV (bronze)
+      - name: Upload Bronze CSVs to Cloud Storage
+        run: |
+          gsutil -m mkdir -p gs://${BUCKET}/bronze/csv
+          gsutil -m cp data/*.csv gs://${BUCKET}/bronze/csv/
+          echo "Bronze files:"
+          gsutil ls gs://${BUCKET}/bronze/csv/
+
+      # 2) SUBE CÓDIGO
       - name: Deploy Spark pipeline to Cloud Storage
         run: |
+          gsutil -m mkdir -p gs://${BUCKET}/code
           gsutil cp src/pipeline_wasi_qollqui.py gs://${BUCKET}/code/pipeline_wasi_qollqui.py
 
+      # 3) EJECUTA DATAPROC SERVERLESS
       - name: Run Dataproc Serverless batch
         run: |
           gcloud dataproc batches submit pyspark gs://${BUCKET}/code/pipeline_wasi_qollqui.py \
@@ -48,6 +59,11 @@ jobs:
             --version=2.2 \
             --service-account=${SA_EMAIL} \
             --properties=spark.wasi.bucket=${BUCKET}
+
+      # 4) BIGQUERY: CREAR DATASET SI NO EXISTE + MATERIALIZAR TABLA BI
+      - name: Create dataset if not exists
+        run: |
+          bq --location=${BQ_LOCATION} mk --dataset --if_not_exists ${PROJECT_ID}:${DATASET}
 
       - name: Materialize BI table in BigQuery
         run: |
