@@ -2,11 +2,8 @@
 
 from pyspark.sql import SparkSession
 import os
-import sys
 
-# Detectar entorno
-# Por defecto: local
-ENV = os.getenv("ENV", "local")
+ENV = os.getenv("ENV", "prod")
 
 if ENV == "local":
     BRONZE_PATH = "./data/bronze"
@@ -27,12 +24,10 @@ tables = [
     "dim_calendario"
 ]
 
-
 def main():
 
     spark = SparkSession.builder \
         .appName("BronzeToSilver") \
-        .master("local[*]") \
         .getOrCreate()
 
     for table in tables:
@@ -43,11 +38,9 @@ def main():
 
         df = spark.read.parquet(input_path)
 
-        # limpiar nombres de columnas
         for column in df.columns:
             df = df.withColumnRenamed(column, column.lower().strip())
 
-        # eliminar duplicados
         df = df.dropDuplicates()
 
         df.write.mode("overwrite").parquet(output_path)
