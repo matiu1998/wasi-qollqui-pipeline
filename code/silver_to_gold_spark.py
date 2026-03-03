@@ -1,5 +1,3 @@
-# code/silver_to_gold_spark.py
-
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import col
 import os
@@ -21,30 +19,41 @@ def main():
         .appName("SilverToGold") \
         .getOrCreate()
 
-    # ========================
-    # DIMENSIONS
-    # ========================
+    print("Building Dimensions...")
 
+    # =========================
+    # DIM CLIENTE
+    # =========================
     clientes = spark.read.parquet(f"{SILVER_PATH}/clientes")
     dim_cliente = clientes.dropDuplicates(["customer_id"])
     dim_cliente.write.mode("overwrite").parquet(f"{GOLD_PATH}/dim_cliente")
 
+    # =========================
+    # DIM PRODUCTO
+    # =========================
     productos = spark.read.parquet(f"{SILVER_PATH}/productos")
     dim_producto = productos.dropDuplicates(["product_id"])
     dim_producto.write.mode("overwrite").parquet(f"{GOLD_PATH}/dim_producto")
 
+    # =========================
+    # DIM GESTOR
+    # =========================
     gestores = spark.read.parquet(f"{SILVER_PATH}/gestores")
     dim_gestor = gestores.dropDuplicates(["gestor_id"])
     dim_gestor.write.mode("overwrite").parquet(f"{GOLD_PATH}/dim_gestor")
 
+    # =========================
+    # DIM FECHA
+    # =========================
     calendario = spark.read.parquet(f"{SILVER_PATH}/dim_calendario")
     dim_fecha = calendario.dropDuplicates(["fecha"])
     dim_fecha.write.mode("overwrite").parquet(f"{GOLD_PATH}/dim_fecha")
 
-    # ========================
-    # FACT TABLES
-    # ========================
+    print("Building Fact Tables...")
 
+    # =========================
+    # FACT DEUDA
+    # =========================
     deuda = spark.read.parquet(f"{SILVER_PATH}/deuda")
 
     fact_deuda = deuda.select(
@@ -61,7 +70,9 @@ def main():
 
     fact_deuda.write.mode("overwrite").parquet(f"{GOLD_PATH}/fact_deuda")
 
-
+    # =========================
+    # FACT PAGOS
+    # =========================
     pagos = spark.read.parquet(f"{SILVER_PATH}/pagos")
 
     fact_pagos = pagos.select(
@@ -76,7 +87,9 @@ def main():
 
     fact_pagos.write.mode("overwrite").parquet(f"{GOLD_PATH}/fact_pagos")
 
-
+    # =========================
+    # FACT GESTIONES
+    # =========================
     gestiones = spark.read.parquet(f"{SILVER_PATH}/gestiones_cobranza")
 
     fact_gestiones = gestiones.select(
@@ -93,7 +106,24 @@ def main():
 
     fact_gestiones.write.mode("overwrite").parquet(f"{GOLD_PATH}/fact_gestiones")
 
+    # =========================
+    # FACT PROMESAS
+    # =========================
+    promesas = spark.read.parquet(f"{SILVER_PATH}/promesas_pago")
+
+    fact_promesas = promesas.select(
+        "promesa_id",
+        "customer_id",
+        "debt_id",
+        "monto_prometido",
+        "fecha_promesa",
+        "cumplida"
+    )
+
+    fact_promesas.write.mode("overwrite").parquet(f"{GOLD_PATH}/fact_promesas")
+
     spark.stop()
+    print("Silver → Gold completed successfully 🚀")
 
 
 if __name__ == "__main__":
