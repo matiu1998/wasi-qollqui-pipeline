@@ -1,8 +1,10 @@
 # code/bronze_to_silver_spark.py
 
 from pyspark.sql import SparkSession
+from pyspark.sql.functions import col
 import os
 
+# Por defecto asumimos producción
 ENV = os.getenv("ENV", "prod")
 
 if ENV == "local":
@@ -24,11 +26,14 @@ tables = [
     "dim_calendario"
 ]
 
+
 def main():
 
-    spark = SparkSession.builder \
-        .appName("BronzeToSilver") \
+    spark = (
+        SparkSession.builder
+        .appName("BronzeToSilver")
         .getOrCreate()
+    )
 
     for table in tables:
         print(f"Processing {table}")
@@ -38,12 +43,19 @@ def main():
 
         df = spark.read.parquet(input_path)
 
-        for column in df.columns:
-            df = df.withColumnRenamed(column, column.lower().strip())
+        # Normalizar nombres de columnas
+        for column_name in df.columns:
+            df = df.withColumnRenamed(
+                column_name,
+                column_name.lower().strip()
+            )
 
+        # Eliminar duplicados
         df = df.dropDuplicates()
 
         df.write.mode("overwrite").parquet(output_path)
+
+        print(f"{table} processed successfully")
 
     spark.stop()
 
