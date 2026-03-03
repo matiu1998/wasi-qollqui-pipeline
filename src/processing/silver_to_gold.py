@@ -14,199 +14,150 @@ client = storage.Client()
 bucket = client.bucket(BUCKET_NAME)
 
 
+# =====================================================
+# UTILIDADES
+# =====================================================
+
 def read_parquet_from_gcs(path):
-
     blob = bucket.blob(path)
-
     data = blob.download_as_bytes()
-
     df = pd.read_parquet(io.BytesIO(data))
-
     return df
 
 
 def upload_parquet(df, path):
-
     buffer = io.BytesIO()
-
     df.to_parquet(buffer, index=False)
-
     blob = bucket.blob(path)
-
     blob.upload_from_string(buffer.getvalue())
-
     logger.info(f"Gold dataset written: {path}")
 
 
-# ---------------------------------------
-# KPI CLIENTE
-# ---------------------------------------
+# =====================================================
+# BUILD DIMENSIONS
+# =====================================================
 
-def generate_kpi_cliente():
+def build_dimensions():
 
-    logger.info("Generating KPI Cliente")
+    logger.info("Building Dimensions")
 
+    # DIM CLIENTE
     clientes = read_parquet_from_gcs("silver/clientes/clientes.parquet")
+    dim_cliente = clientes.drop_duplicates(subset=["customer_id"])
+    upload_parquet(dim_cliente, "gold/dim_cliente/dim_cliente.parquet")
+
+    # DIM PRODUCTO
+    productos = read_parquet_from_gcs("silver/productos/productos.parquet")
+    dim_producto = productos.drop_duplicates(subset=["product_id"])
+    upload_parquet(dim_producto, "gold/dim_producto/dim_producto.parquet")
+
+    # DIM GESTOR
+    gestores = read_parquet_from_gcs("silver/gestores/gestores.parquet")
+    dim_gestor = gestores.drop_duplicates(subset=["gestor_id"])
+    upload_parquet(dim_gestor, "gold/dim_gestor/dim_gestor.parquet")
+
+    # DIM FECHA
+    calendario = read_parquet_from_gcs("silver/dim_calendario/dim_calendario.parquet")
+    dim_fecha = calendario.drop_duplicates(subset=["fecha"])
+    upload_parquet(dim_fecha, "gold/dim_fecha/dim_fecha.parquet")
+
+
+# =====================================================
+# BUILD FACT TABLES
+# =====================================================
+
+def build_facts():
+
+    logger.info("Building Fact Tables")
+
+    # FACT DEUDA
     deuda = read_parquet_from_gcs("silver/deuda/deuda.parquet")
+
+    fact_deuda = deuda[
+        [
+            "debt_id",
+            "customer_id",
+            "product_id",
+            "monto_original",
+            "saldo_actual",
+            "dias_mora",
+            "bucket_mora",
+            "fecha_vencimiento",
+            "estado_deuda",
+        ]
+    ]
+
+    upload_parquet(fact_deuda, "gold/fact_deuda/fact_deuda.parquet")
+
+    # FACT PAGOS
     pagos = read_parquet_from_gcs("silver/pagos/pagos.parquet")
 
-    deuda_cliente = deuda.groupby("customer_id").agg(
-        deuda_total=("monto_original", "sum"),
-        saldo_actual=("saldo_actual", "sum")
-    ).reset_index()
+    fact_pagos = pagos[
+        [
+            "payment_id",
+            "debt_id",
+            "customer_id",
+            "monto_pago",
+            "metodo_pago",
+            "canal_pago",
+            "fecha_pago",
+        ]
+    ]
 
-    pagos_cliente = pagos.groupby("customer_id").agg(
-        total_pagado=("monto_pago", "sum")
-    ).reset_index()
+    upload_parquet(fact_pagos, "gold/fact_pagos/fact_pagos.parquet")
 
-    df = deuda_cliente.merge(pagos_cliente, on="customer_id", how="left")
-
-    df["total_pagado"] = df["total_pagado"].fillna(0)
-
-    df["ratio_recuperacion"] = df["total_pagado"] / df["deuda_total"]
-
-    upload_parquet(df, "gold/kpi_cliente/kpi_cliente.parquet")
-
-
-# ---------------------------------------
-# KPI GESTOR
-# ---------------------------------------
-
-def generate_kpi_gestor():
-
-    logger.info("Generating KPI Gestor")
-
+    # FACT GESTIONES
     gestiones = read_parquet_from_gcs(
         "silver/gestiones_cobranza/gestiones_cobranza.parquet"
     )
 
-    gestores = read_parquet_from_gcs(
-        "silver/gestores/gestores.parquet"
-    )
+    fact_gestiones = gestiones[
+        [
+            "gestion_id",
+            "customer_id",
+            "debt_id",
+            "gestor_id",
+            "canal",
+            "resultado",
+            "exito_gestion",
+            "tiempo_respuesta_min",
+            "fecha_gestion",
+        ]
+    ]
 
-    # CORRECCIÓN DE TIPOS
-    gestiones["exito_gestion"] = pd.to_numeric(
-        gestiones["exito_gestion"],
-        errors="coerce"
-    ).fillna(0)
+    upload_parquet(fact_gestiones, "gold/fact_gestiones/fact_gestiones.parquet")
 
-    gestiones_agg = gestiones.groupby("gestor_id").agg(
-        total_gestiones=("gestion_id", "count"),
-        gestiones_exitosas=("exito_gestion", "sum")
-    ).reset_index()
-
-    gestiones_agg["tasa_exito"] = (
-        gestiones_agg["gestiones_exitosas"] /
-        gestiones_agg["total_gestiones"]
-    )
-
-    df = gestiones_agg.merge(gestores, on="gestor_id", how="left")
-
-    upload_parquet(df, "gold/kpi_gestor/kpi_gestor.parquet")
-
-
-# ---------------------------------------
-# KPI MORA
-# ---------------------------------------
-
-def generate_kpi_mora():
-
-    logger.info("Generating KPI Mora Bucket")
-
-    deuda = read_parquet_from_gcs("silver/deuda/deuda.parquet")
-
-    df = deuda.groupby("bucket_mora").agg(
-        clientes=("customer_id", "nunique"),
-        deuda_total=("saldo_actual", "sum")
-    ).reset_index()
-
-    upload_parquet(df, "gold/kpi_mora_bucket/kpi_mora_bucket.parquet")
-
-
-# ---------------------------------------
-# KPI COBRANZA RESUMEN
-# ---------------------------------------
-
-def generate_kpi_cobranza_resumen():
-
-    logger.info("Generating KPI Cobranza Resumen")
-
-    deuda = read_parquet_from_gcs("silver/deuda/deuda.parquet")
-    pagos = read_parquet_from_gcs("silver/pagos/pagos.parquet")
-
-    deuda_total = deuda["monto_original"].sum()
-    saldo_actual = deuda["saldo_actual"].sum()
-    total_pagado = pagos["monto_pago"].sum()
-
-    recovery_rate = total_pagado / deuda_total
-
-    df = pd.DataFrame([{
-        "deuda_total": deuda_total,
-        "saldo_actual": saldo_actual,
-        "total_pagado": total_pagado,
-        "recovery_rate": recovery_rate
-    }])
-
-    upload_parquet(
-        df,
-        "gold/kpi_cobranza_resumen/kpi_cobranza_resumen.parquet"
-    )
-
-
-# ---------------------------------------
-# KPI PROMESAS
-# ---------------------------------------
-# ---------------------------------------
-# KPI PROMESAS
-# ---------------------------------------
-
-def generate_kpi_promesas():
-
-    logger.info("Generating KPI Promesas Pago")
-
+    # FACT PROMESAS
     promesas = read_parquet_from_gcs(
         "silver/promesas_pago/promesas_pago.parquet"
     )
 
-    # CORRECCIÓN DE TIPO
-    promesas["cumplida"] = pd.to_numeric(
-        promesas["cumplida"],
-        errors="coerce"
-    ).fillna(0)
+    fact_promesas = promesas[
+        [
+            "promesa_id",
+            "customer_id",
+            "debt_id",
+            "monto_prometido",
+            "fecha_promesa",
+            "cumplida",
+        ]
+    ]
 
-    total_promesas = len(promesas)
-
-    promesas_cumplidas = promesas["cumplida"].sum()
-
-    tasa_cumplimiento = promesas_cumplidas / total_promesas
-
-    df = pd.DataFrame([{
-        "total_promesas": total_promesas,
-        "promesas_cumplidas": promesas_cumplidas,
-        "tasa_cumplimiento": tasa_cumplimiento
-    }])
-
-    upload_parquet(
-        df,
-        "gold/kpi_promesas_pago/kpi_promesas_pago.parquet"
-    )
+    upload_parquet(fact_promesas, "gold/fact_promesas/fact_promesas.parquet")
 
 
-# ---------------------------------------
+# =====================================================
 # RUN PIPELINE
-# ---------------------------------------
+# =====================================================
 
 def run():
 
-    logger.info("Starting Silver → Gold pipeline")
+    logger.info("Starting Silver → Gold (Dimensional Model)")
 
-    generate_kpi_cliente()
-    generate_kpi_gestor()
-    generate_kpi_mora()
-    generate_kpi_cobranza_resumen()
-    generate_kpi_promesas()
+    build_dimensions()
+    build_facts()
 
-    logger.info("Gold pipeline completed")
+    logger.info("Gold Model Completed Successfully 🚀")
 
 
 if __name__ == "__main__":
